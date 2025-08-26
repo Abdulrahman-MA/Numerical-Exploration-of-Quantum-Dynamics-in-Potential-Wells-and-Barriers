@@ -25,6 +25,7 @@ def infinite_well_potential(x, L):
     the infinite well potential
     """
     V = np.zeros_like(x)
+    V[np.abs(x) >= L / 2] = 1e6
     return V
 
 def build_hamiltonian(D2, V):

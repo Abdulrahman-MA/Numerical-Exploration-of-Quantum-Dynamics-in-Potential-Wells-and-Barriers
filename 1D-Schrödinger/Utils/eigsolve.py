@@ -1,9 +1,6 @@
 import numpy as np
 from scipy.sparse.linalg import eigsh
 from Functions import make_grid, second_derivative_matrix, infinite_well_potential, build_hamiltonian
-from scipy.sparse import diags
-
-
 
 if __name__ == "__main__":
     """
