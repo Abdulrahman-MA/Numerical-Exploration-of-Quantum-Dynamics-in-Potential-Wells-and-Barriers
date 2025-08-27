@@ -72,21 +72,22 @@ with h5py.File(h5_file, "w") as f_master:
 
     # Progress bar for states
     for n in tqdm(range(n_states), desc="States", unit="state"):
-        E = vals[n]
-        psi0 = vecs[:, n]
+        c = np.zeros(n_states, dtype=complex)
+        c[0] = 1 / np.sqrt(2)
+        c[1] = 1 / np.sqrt(2)
 
-        # Preallocate
         psi_real = np.zeros((n_steps, N))
         psi_imag = np.zeros((n_steps, N))
         psi_prob = np.zeros((n_steps, N))
 
-        # Progress bar for time evolution
         for i, t in enumerate(tqdm(times, desc=f"Time evolution (state {n})", unit="step", leave=False)):
-            phase = np.exp(-1j * E * t)
-            psi_t = psi0 * phase
+            psi_t = np.zeros(N, dtype=complex)
+            for k in range(n_states):
+                psi_t += c[k] * vecs[:, k] * np.exp(-1j * vals[k] * t)
+
             psi_real[i, :] = np.real(psi_t)
             psi_imag[i, :] = np.imag(psi_t)
-            psi_prob[i, :] = np.abs(psi_t)**2
+            psi_prob[i, :] = np.abs(psi_t) ** 2
 
         # Save into master file
         psi_real_all[n, :, :] = psi_real
@@ -101,7 +102,8 @@ with h5py.File(h5_file, "w") as f_master:
             f_state.create_dataset("psi_prob", data=psi_prob, compression="gzip")
             f_state.create_dataset("x", data=x)
             f_state.create_dataset("times", data=times)
-            f_state.create_dataset("energy", data=E)
+            f_state.create_dataset("energy", data=vals[n])
+
 
 print(f"\n Data saved in master file: {h5_file}")
 print(f" Separate files per state saved in: {data_path}")
