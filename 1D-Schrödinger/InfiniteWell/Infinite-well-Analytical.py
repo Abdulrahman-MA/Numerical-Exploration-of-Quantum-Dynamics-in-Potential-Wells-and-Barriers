@@ -1,101 +1,179 @@
+"""
+Quantum Infinite Well Analytical Simulator
+=========================================
+
+This module computes the analytical eigenfunctions and time evolution
+of a quantum particle in a 1D infinite square well centered at 0.
+Results are saved to HDF5 for consistency with numerical simulations.
+
+Features:
+- Analytical eigenfunctions (sine/cosine)
+- Analytical energy levels
+- Time evolution with closed-form solution
+- Automatic directory and file management
+
+Author: Abdelrahman Mohamed
+Date: 2025-8
+"""
+
 import os
 import h5py
 import numpy as np
-from pathlib import Path
 from tqdm import tqdm
+from pathlib import Path
 
-# ==============================
-# PATHS (dynamic, relative to notebook)
-# ==============================
-base_dir   = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
-data_path  = base_dir / "Data"
 
-os.makedirs(data_path / "Analytical", exist_ok=True)
+# =============================================================================
+# Helper functions
+# =============================================================================
+def psi_n_analytic(n: int, x: np.ndarray, L: float) -> np.ndarray:
+    """Analytical eigenfunction for infinite square well centered at 0."""
+    if n % 2 == 1:  # odd index → cosine
+        return np.sqrt(2 / L) * np.cos(n * np.pi * x / L)
+    else:           # even index → sine
+        return np.sqrt(2 / L) * np.sin(n * np.pi * x / L)
 
-# ==============================
-# PARAMETERS
-# ==============================
-xmin, xmax = -1.0, 1.0
-N = 1000
-L = xmax - xmin
-dt = 0.01          # time step
-T_total = 5.0      # simulate 5 seconds per state
-n_steps = int(T_total / dt)
-n_states = 5       # number of eigenstates to evolve
 
-# ==============================
-# GRID
-# ==============================
-x = np.linspace(xmin, xmax, N)
-
-def psi_n_analytic(n, x, L):
-    """Analytical eigenfunction for infinite square well centered at 0"""
-    if n % 2 == 1:  # odd -> cosine
-        return np.sqrt(2/L) * np.cos(n * np.pi * x / L)
-    else:           # even -> sine
-        return np.sqrt(2/L) * np.sin(n * np.pi * x / L)
-
-def E_n_analytic(n, L):
-    """Analytical energy"""
+def E_n_analytic(n: int, L: float) -> float:
+    """Analytical energy eigenvalue for state n."""
     return (n**2 * np.pi**2) / (2 * L**2)
 
-# ==============================
-# TIME EVOLUTION + SAVE
-# ==============================
-h5_file = data_path / "Analytical/simulation_data.h5"
 
-with h5py.File(h5_file, "w") as f_master:
+# =============================================================================
+# Simulator Class
+# =============================================================================
+class AnalyticalWellSimulator:
+    """
+    Analytical Infinite Square Well Simulator.
 
-    # Create master datasets
-    f_master.create_dataset("x", data=x)
-    f_master.create_dataset("times", data=np.linspace(0, T_total, n_steps))
-    energies = np.array([E_n_analytic(n+1, L) for n in range(n_states)])
-    f_master.create_dataset("energies", data=energies)
+    Attributes
+    ----------
+    x : np.ndarray
+        Spatial grid.
+    times : np.ndarray
+        Time points.
+    n_states : int
+        Number of eigenstates evolved.
+    L : float
+        Well width.
+    """
 
-    psi_real_all = f_master.create_dataset(
-        "psi_real", shape=(n_states, n_steps, N), dtype=np.float64, compression="gzip"
-    )
-    psi_imag_all = f_master.create_dataset(
-        "psi_imag", shape=(n_states, n_steps, N), dtype=np.float64, compression="gzip"
-    )
-    psi_prob_all = f_master.create_dataset(
-        "psi_prob", shape=(n_states, n_steps, N), dtype=np.float64, compression="gzip"
-    )
+    def __init__(self, xmin=-1.0, xmax=1.0, N=1000, dt=0.01, T_total=5.0, n_states=5,
+                 base_dir: Path | str = "Data"):
+        """
+        Initialize the simulator.
 
-    times = f_master["times"][:]
+        Parameters
+        ----------
+        xmin, xmax : float
+            Spatial domain boundaries.
+        N : int
+            Number of grid points.
+        dt : float
+            Time step.
+        T_total : float
+            Total simulation time.
+        n_states : int
+            Number of eigenstates to compute.
+        base_dir : str or Path
+            Base directory for saving results.
+        """
+        self.xmin, self.xmax, self.N = xmin, xmax, N
+        self.dt, self.T_total, self.n_states = dt, T_total, n_states
 
-    # Progress bar for states
-    for n in tqdm(range(1, n_states+1), desc="States", unit="state"):
-        E = E_n_analytic(n, L)
-        psi0 = psi_n_analytic(n, x, L)
+        self.x = np.linspace(xmin, xmax, N)
+        self.L = xmax - xmin
+        self.times = np.linspace(0, T_total, int(T_total / dt))
 
-        # Preallocate
-        psi_real = np.zeros((n_steps, N))
-        psi_imag = np.zeros((n_steps, N))
-        psi_prob = np.zeros((n_steps, N))
+        # paths
+        self.base_dir = Path(base_dir)
+        self.ana_dir = self.base_dir / "Analytical"
+        os.makedirs(self.ana_dir, exist_ok=True)
 
-        # Progress bar for time evolution
-        for i, t in enumerate(tqdm(times, desc=f"Time evolution (state {n})", unit="step", leave=False)):
+        # storage
+        self.energies = np.array([E_n_analytic(n + 1, self.L) for n in range(n_states)])
+
+    # -------------------------------------------------------------------------
+    def evolve_state(self, n: int):
+        """
+        Time evolve the n-th analytical eigenstate.
+
+        Parameters
+        ----------
+        n : int
+            State index (0-based, maps to n+1).
+
+        Returns
+        -------
+        psi_real, psi_imag, psi_prob : np.ndarray
+            Arrays of shape (n_steps, N).
+        """
+        n_eff = n + 1  # shift (state index starts from 1 in formulas)
+        E = self.energies[n]
+        psi0 = psi_n_analytic(n_eff, self.x, self.L)
+
+        psi_real = np.zeros((len(self.times), self.N))
+        psi_imag = np.zeros((len(self.times), self.N))
+        psi_prob = np.zeros((len(self.times), self.N))
+
+        for i, t in enumerate(self.times):
             phase = np.exp(-1j * E * t)
             psi_t = psi0 * phase
             psi_real[i, :] = np.real(psi_t)
             psi_imag[i, :] = np.imag(psi_t)
             psi_prob[i, :] = np.abs(psi_t)**2
 
-        # Save into master file
-        psi_real_all[n-1, :, :] = psi_real
-        psi_imag_all[n-1, :, :] = psi_imag
-        psi_prob_all[n-1, :, :] = psi_prob
+        return psi_real, psi_imag, psi_prob
 
-        # Save also as separate file for convenience
-        state_file = data_path / f"Analytical/state_{n}.h5"
-        with h5py.File(state_file, "w") as f_state:
-            f_state.create_dataset("psi_real", data=psi_real, compression="gzip")
-            f_state.create_dataset("psi_imag", data=psi_imag, compression="gzip")
-            f_state.create_dataset("psi_prob", data=psi_prob, compression="gzip")
-            f_state.create_dataset("x", data=x)
-            f_state.create_dataset("times", data=times)
-            f_state.create_dataset("energy", data=E)
+    # -------------------------------------------------------------------------
+    def run(self):
+        """Run full simulation and save results to HDF5."""
+        h5_file = self.ana_dir / "simulation_data.h5"
 
-print(f"\n Data saved in master file: {h5_file}")
-print(f" Separate files per state saved in: {data_path}")
+        with h5py.File(h5_file, "w") as f_master:
+            # master datasets
+            f_master.create_dataset("x", data=self.x)
+            f_master.create_dataset("times", data=self.times)
+            f_master.create_dataset("energies", data=self.energies)
+
+            psi_real_all = f_master.create_dataset(
+                "psi_real", shape=(self.n_states, len(self.times), self.N),
+                dtype=np.float64, compression="gzip"
+            )
+            psi_imag_all = f_master.create_dataset(
+                "psi_imag", shape=(self.n_states, len(self.times), self.N),
+                dtype=np.float64, compression="gzip"
+            )
+            psi_prob_all = f_master.create_dataset(
+                "psi_prob", shape=(self.n_states, len(self.times), self.N),
+                dtype=np.float64, compression="gzip"
+            )
+
+            # loop over states
+            for n in tqdm(range(self.n_states), desc="Analytical states", unit="state"):
+                psi_real, psi_imag, psi_prob = self.evolve_state(n)
+
+                psi_real_all[n, :, :] = psi_real
+                psi_imag_all[n, :, :] = psi_imag
+                psi_prob_all[n, :, :] = psi_prob
+
+                # individual file
+                state_file = self.ana_dir / f"state_{n}.h5"
+                with h5py.File(state_file, "w") as f_state:
+                    f_state.create_dataset("psi_real", data=psi_real, compression="gzip")
+                    f_state.create_dataset("psi_imag", data=psi_imag, compression="gzip")
+                    f_state.create_dataset("psi_prob", data=psi_prob, compression="gzip")
+                    f_state.create_dataset("x", data=self.x)
+                    f_state.create_dataset("times", data=self.times)
+                    f_state.create_dataset("energy", data=self.energies[n])
+
+        print(f"\nMaster file saved at: {h5_file}")
+        print(f"Per-state files saved in: {self.ana_dir}")
+
+
+# =============================================================================
+# Script entry point
+# =============================================================================
+if __name__ == "__main__":
+    sim = AnalyticalWellSimulator()
+    sim.run()
