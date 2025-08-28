@@ -1,3 +1,5 @@
 /.venv
 /1D-Schrödinger/InfiniteWell/Data
 1D-Schrödinger/InfiniteWell/Testing.py
+/1D-Schrödinger/InfiniteWell/__pycache__
+/1D-Schrödinger/InfiniteWell/media
