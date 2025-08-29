@@ -82,12 +82,6 @@ class QuantumPsiWithProb(Scene):
 
         labels_prob = axes_prob.get_axis_labels(MathTex("x"), MathTex(r"|\psi(x)|^2"))
 
-        self.play(
-            Write(axes_psi), Write(labels_psi),
-            Write(axes_prob), Write(labels_prob),
-            run_time=2
-        )
-
         # ----------------------------
         # 4. Curve factory helper
         # ----------------------------
@@ -105,20 +99,59 @@ class QuantumPsiWithProb(Scene):
         curve_imag = make_curve(psi_imag[0, 0, :], axes_psi, color=RED)
         curve_prob = make_curve(psi_prob[0, :], axes_prob, color=GREEN)
 
-        self.play(Create(curve_real), Create(curve_imag), Create(curve_prob), run_time=2)
 
         label = Tex(f"State 0, E = {energies[0]:.3f}").to_edge(UP)
-        self.play(Write(label))
+        
 
         # ----------------------------
-        # 6. Animation parameters
+        # 6. Legend for curves
+        # ----------------------------
+        def make_legend_item(color, text):
+            marker = Square(side_length=0.2, fill_color=color, fill_opacity=1, stroke_width=0)
+            label = MathTex(text).scale(0.6).next_to(marker, RIGHT, buff=0.2)
+            return VGroup(marker, label)
+
+        items = VGroup(
+            make_legend_item(BLUE, r"\text{Re}(\psi)"),
+            make_legend_item(RED, r"\text{Im}(\psi)"),
+            make_legend_item(GREEN, r"|\psi|^2")
+        ).arrange(DOWN, aligned_edge=LEFT, buff=0.3).scale(0.9)
+
+        # ----------------------------
+        # Rectangle background
+        # ----------------------------
+        rect = Rectangle(
+            width=items.width + 0.5,
+            height=items.height + 0.5,
+            stroke_color=WHITE,
+            stroke_width=1.5,
+            fill_color=BLACK,
+            fill_opacity=0.15
+        )
+        rect.surround(items, buff=0.3)
+
+        legend = VGroup(rect, items).to_corner(UL)
+
+        self.play(
+            Write(legend), Write(label),
+            Write(axes_psi), Write(labels_psi),
+            Write(axes_prob), Write(labels_prob),
+            run_time=2
+            )
+        
+        self.play(
+            Create(curve_real), Create(curve_imag), 
+            Create(curve_prob), run_time=2
+            )
+        # ----------------------------
+        # 7. Animation parameters
         # ----------------------------
         seconds_per_timeblock = 6   # duration of ψ(x,t) evolution per state
         transition_duration = 2     # smooth transition to next state
         seconds_per_state_pause = 1 # pause after each state
 
         # ----------------------------
-        # 7. Animate time evolution
+        # 8. Animate time evolution
         # ----------------------------
         for s in range(n_states):
             # Animate ψ(x,t) over time for current state
@@ -151,7 +184,7 @@ class QuantumPsiWithProb(Scene):
                 self.wait(seconds_per_state_pause)
 
         # ----------------------------
-        # 8. Outro cleanup
+        # 9. Outro cleanup
         # ----------------------------
         self.wait(2)
         self.play(
@@ -161,6 +194,7 @@ class QuantumPsiWithProb(Scene):
             Uncreate(label),
             Uncreate(axes_psi), Uncreate(labels_psi),
             Uncreate(axes_prob), Uncreate(labels_prob),
+            Uncreate(legend),
             run_time=3
         )
         self.wait(1)
