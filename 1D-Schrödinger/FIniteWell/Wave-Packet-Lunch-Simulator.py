@@ -1,291 +1,266 @@
 """
-Wave Packet Scattering Simulator (Numerical, Split-Operator FFT)
-================================================================
+Quantum Scattering Simulator (Split-Operator Method)
+====================================================
 
-- Uniform 1D grid with periodic FFT propagation and edge absorbers.
-- Gaussian wave packet initialized at x0 with mean momentum k0.
-- Potential: square barrier (configurable width/height/center), or custom.
-- Outputs time series of psi (real/imag), |psi|^2, and R/T vs time.
+This module implements a 1D quantum wave packet simulator using the
+split-operator Fourier method. It allows the study of scattering,
+tunneling, bound states, and free propagation in different potentials.
 
-Units: ħ = 1, m = 1.
+Features:
+- Infinite square well
+- Finite well / barrier
+- Harmonic oscillator
+- Gaussian wave packet initialization
+- Absorbing boundary layers
+- HDF5 output for real, imaginary, and probability densities
+- Pre-check function to classify scenarios before running
 
 Author: Abdelrahman Mohamed
 Date: 2025-08
 """
 
-from __future__ import annotations
 import os
-from pathlib import Path
-
 import h5py
 import numpy as np
-from numpy.fft import fft, ifft, fftfreq
 from tqdm import tqdm
+from pathlib import Path
+import pyqtgraph as pg
 
 
-# -----------------------------------------------------------------------------
-# Potentials
-# -----------------------------------------------------------------------------
-def square_barrier_potential(x: np.ndarray, center: float = 0.0,
-                             width: float = 0.2, height: float = 10.0) -> np.ndarray:
-    """Square barrier of given width/height centered at `center`."""
-    half = width / 2.0
-    V = np.zeros_like(x)
-    V[(x >= center - half) & (x <= center + half)] = height
+# =============================================================================
+# Scenario Pre-check
+# =============================================================================
+def precheck_scenario(L: float, V_inside: float, V_outside: float,
+                      k0: float, x_start: float) -> tuple[float, str]:
+    """
+    Quick classification of the quantum scattering scenario.
+    """
+    E0 = 0.5 * k0**2  # kinetic energy in natural units
+
+    if np.isclose(V_inside, V_outside):
+        if np.isclose(E0, V_inside):
+            mode = "Free particle (at threshold energy)"
+        else:
+            mode = "Free particle (flat potential)"
+    elif V_outside < V_inside:
+        if E0 < V_outside:
+            mode = "Bound state (localized inside well)"
+        elif E0 < V_inside:
+            mode = "Resonant tunneling (partially trapped)"
+        else:
+            mode = "Free / scattering out of the well"
+    else:
+        if E0 < V_outside:
+            if x_start < -L/2 or x_start > L/2:
+                mode = "Reflection with possible tunneling"
+            else:
+                mode = "Metastable trapped (inside, can tunnel out)"
+        elif np.isclose(E0, V_outside):
+            mode = "Threshold scattering"
+        else:
+            mode = "Normal scattering (transmission + reflection)"
+
+    print("=== Scenario Pre-check ===")
+    print(f"Inside potential : {V_inside}")
+    print(f"Outside potential: {V_outside}")
+    print(f"Packet energy    : {E0:.4f}")
+    print(f"Result           : {mode}")
+
+
+# =============================================================================
+# Potential Definitions
+# =============================================================================
+def finite_well(x: np.ndarray, L: float,
+                V_inside: float = 0.0, V_outside: float = 1.0) -> np.ndarray:
+    V = np.ones_like(x) * V_outside
+    V[np.abs(x) < L / 2] = V_inside
     return V
 
 
-# -----------------------------------------------------------------------------
-# Absorber (mask) to avoid spurious reflections from box edges
-# -----------------------------------------------------------------------------
-def edge_absorber(x: np.ndarray, xmin: float, xmax: float,
-                  thickness: float = 0.2, power: float = 4.0) -> np.ndarray:
-    """
-    Smooth multiplicative mask M(x) in [0,1] applied each step near edges.
-    - thickness: physical thickness of each absorbing layer at both ends
-    - power: controls steepness (>=2 typical). Larger -> steeper absorption.
-    """
-    L = xmax - xmin
+# =============================================================================
+# Absorber
+# =============================================================================
+def make_edge_absorber(x: np.ndarray, xmin: float, xmax: float,
+                       thickness: float = 1.0,
+                       power: float = 4.0,
+                       strength: float = 8.0) -> np.ndarray:
+    if thickness is None or thickness <= 0:
+        return np.ones_like(x)
+
     left_start = xmin + thickness
     right_start = xmax - thickness
+    M = np.ones_like(x, dtype=float)
 
-    M = np.ones_like(x)
+    mask_left = x <= left_start
+    if np.any(mask_left):
+        d = (left_start - x[mask_left]) / thickness
+        d = np.clip(d, 0.0, 1.0)
+        M[mask_left] = np.exp(- strength * (d ** power))
 
-    # Left edge region
-    left_mask = x < left_start
-    if np.any(left_mask):
-        # normalized distance to left boundary in [0,1]
-        d = (x[left_mask] - xmin) / thickness
-        # go to 0 smoothly at boundary (x=xmin)
-        M[left_mask] = np.exp(-((1 - d) ** power))
-
-    # Right edge region
-    right_mask = x > right_start
-    if np.any(right_mask):
-        d = (xmax - x[right_mask]) / thickness
-        M[right_mask] = np.exp(-((1 - d) ** power))
+    mask_right = x >= right_start
+    if np.any(mask_right):
+        d = (x[mask_right] - right_start) / thickness
+        d = np.clip(d, 0.0, 1.0)
+        M[mask_right] = np.exp(- strength * (d ** power))
 
     return M
 
 
-# -----------------------------------------------------------------------------
-# Simulator
-# -----------------------------------------------------------------------------
-class WavePacketScatteringSimulator:
-    """
-    Numerical 1D scattering using split-operator method.
-
-    Grid/Time
-    ---------
-    xmin, xmax : domain limits
-    N         : number of grid points (use power-of-two-ish for FFT speed)
-    dt        : time step
-    steps     : number of time steps to propagate
-
-    Initial packet
-    --------------
-    x0     : initial center
-    sigma  : spatial width
-    k0     : mean wave number (controls kinetic energy E = k0^2 / 2)
-
-    Potential
-    ---------
-    Pass a callable V_func(x) -> V(x), or use the default square barrier via
-    barrier_* parameters.
-
-    Absorber
-    --------
-    absorber_thickness, absorber_power : tuned to reduce edge reflections.
-
-    Outputs
-    -------
-    - HDF5 with x, times, V(x), psi_real(t,x), psi_imag(t,x), psi_prob(t,x),
-      R_t, T_t, and final R, T.
-    """
-
-    def __init__(
-        self,
-        xmin: float = -10.0,
-        xmax: float = 10.0,
-        N: int = 4096,
-        dt: float = 0.002,
-        steps: int = 6000,
-        # initial packet
-        x0: float = -5.0,
-        sigma: float = 0.5,
-        k0: float = 8.0,
-        # potential (square barrier by default)
-        V_center: float = 0.0,
-        V_width: float = 0.5,
-        V_height: float = 10.0,
-        V_func=None,  # optional custom potential: def V_func(x)->array
-        # absorber at edges
-        absorber_thickness: float = 0.0,
-        absorber_power: float = 4.0,
-        # saving
-        base_dir: str | Path = "Data/Scattering",
-        save_every: int = 10,   # downsample in time when storing
-    ):
-        self.xmin, self.xmax, self.N = xmin, xmax, N
-        self.dt, self.steps = dt, steps
-        self.x = np.linspace(xmin, xmax, N, endpoint=False)  # periodic grid for FFT
-        self.dx = self.x[1] - self.x[0]
-        self.times = np.arange(steps) * dt
-
-        # k-grid for kinetic operator (FFT)
-        L = xmax - xmin
-        self.k = 2.0 * np.pi * fftfreq(N, d=self.dx)  # assumes ħ=1
-        self.Tk = 0.5 * (self.k ** 2)                # kinetic energy operator
-
-        # potential
-        if V_func is None:
-            self.V = square_barrier_potential(self.x, center=V_center,
-                                              width=V_width, height=V_height)
-        else:
-            self.V = V_func(self.x)
-
-        self.abs_thickness = absorber_thickness  # store it for diagnostics/R/T
-        # absorber
-        self.abs_mask = np.ones_like(self.x)
-
-
-        # initial packet
-        self.x0 = x0
-        self.sigma = sigma
-        self.k0 = k0
-        self.psi0 = self._gaussian_packet(self.x, x0, sigma, k0)
-
-        # precompute split-operator exponentials
-        self._build_split_operators()
-
-        # saving
+# =============================================================================
+# Quantum Simulator
+# =============================================================================
+class QuantumSimulator:
+    def __init__(self, N=1024, xmin=-12.0, xmax=12.0,
+                 dt=0.005, T_total=10.0, save_every=10,
+                 potential="finite", pot_params=None,
+                 base_dir: str | Path = "Data",
+                 absorber_thickness=0.5):
+        """
+        Initialize simulation.
+        """
+        self.N, self.xmin, self.xmax = N, xmin, xmax
+        self.dt, self.T_total, self.save_every = dt, T_total, save_every
+        self.steps = int(T_total / dt)
         self.base_dir = Path(base_dir)
+
+        # Spatial grid
+        self.x = np.linspace(xmin, xmax, N, endpoint=False)
+        self.dx = self.x[1] - self.x[0]
+
+        # Potential
+        if potential == "finite":
+            self.V = finite_well(self.x, **pot_params)
+        else:
+            raise ValueError(f"Unknown potential: {potential}")
+
+        # Wavefunction
+        self.psi = np.zeros(N, dtype=complex)
+
+        # Momentum grid and kinetic operator
+        self.k = 2.0 * np.pi * np.fft.fftfreq(N, d=self.dx)
+        self.Tk = 0.5 * self.k**2
+
+        # Split-operator propagators
+        self.expV_half = np.exp(-0.5j * dt * self.V)
+        self.expT_full = np.exp(-1.0j * self.Tk * dt)
+
+        # Absorber
+        self.abs_mask = make_edge_absorber(self.x, self.x[0], self.x[-1],
+                                           thickness=absorber_thickness,
+                                           power=100.0)
+
+    def set_initial_packet(self, x0=-8.0, k0=6.0, sigma=0.6):
+        psi0 = np.exp(-(self.x - x0)**2 / (2 * sigma**2)) * np.exp(1j * k0 * self.x)
+        psi0 /= np.sqrt(np.trapezoid(np.abs(psi0)**2, self.x))
+        self.psi = psi0
+
+    def step(self):
+        self.psi *= self.expV_half
+        psi_k = np.fft.fft(self.psi)
+        psi_k *= self.expT_full
+        self.psi = np.fft.ifft(psi_k)
+        self.psi *= self.expV_half
+        self.psi *= self.abs_mask
+
+    def run(self):
+        out_file = self.base_dir / "scattering_run.h5"
         os.makedirs(self.base_dir, exist_ok=True)
-        self.save_every = max(1, int(save_every))
 
-        # where to split space for R/T (relative to barrier center by default)
-        self.split_x = V_center
+        dx = (self.xmax - self.xmin) / self.N
+        self.absorber_thickness = absorber_thickness
+        trim = int(self.absorber_thickness / dx)
 
-    # -------------------------------------------------------------------------
-    @staticmethod
-    def _gaussian_packet(x, x0, sigma, k0):
-        """Normalized Gaussian wave packet with mean momentum k0."""
-        psi = np.exp(-(x - x0) ** 2 / (4.0 * sigma ** 2)) * np.exp(1j * k0 * x)
-        # normalize
-        norm = np.sqrt(np.trapezoid(np.abs(psi) ** 2, x))
-        return psi / norm
+        x_save = self.x[trim: self.N - trim]
+        V_save = self.V[trim: self.N - trim]
 
-    def _build_split_operators(self):
-        """Precompute exp(-i V dt/2) in x-space and exp(-i T dt) in k-space."""
-        self.expV_half = np.exp(-0.5j * self.V * self.dt)
-        self.expT_full = np.exp(-1j * self.Tk * self.dt)
+        with h5py.File(out_file, "w") as f:
+            f.create_dataset("x", data=x_save)
+            f.create_dataset("V", data=V_save)
 
-    # -------------------------------------------------------------------------
-    def run(self, hdf5_path: str | Path = None):
-        """Propagate and save HDF5 with fields and R/T curves."""
-        if hdf5_path is None:
-            hdf5_path = self.base_dir / "scattering_run.h5"
+            psi_real = f.create_dataset("psi_real", (self.steps // self.save_every + 1, len(x_save)), dtype=np.float64)
+            psi_imag = f.create_dataset("psi_imag", (self.steps // self.save_every + 1, len(x_save)), dtype=np.float64)
+            psi_prob = f.create_dataset("psi_prob", (self.steps // self.save_every + 1, len(x_save)), dtype=np.float64)
+            times = f.create_dataset("times", (self.steps // self.save_every + 1,), dtype=np.float64)
 
-        # allocate storage (downsampled in time)
-        keep_idxs = np.arange(0, self.steps, self.save_every, dtype=int)
-        n_keep = len(keep_idxs)
+            psi_real[0] = np.abs(self.psi[trim: self.N - trim].real)
+            psi_imag[0] = np.abs(self.psi[trim: self.N - trim].imag)
+            psi_prob[0] = np.abs(self.psi[trim: self.N - trim]) ** 2
+            times[0] = 0.0
 
-        psi_real_save = np.zeros((n_keep, self.N), dtype=np.float64)
-        psi_imag_save = np.zeros((n_keep, self.N), dtype=np.float64)
-        psi_prob_save = np.zeros((n_keep, self.N), dtype=np.float64)
-        times_save = self.times[keep_idxs]
-        R_t = np.zeros(n_keep, dtype=np.float64)
-        T_t = np.zeros(n_keep, dtype=np.float64)
+            idx = 1
+            for t in tqdm(range(1, self.steps + 1), desc="Propagating"):
+                self.step()
+                if t % self.save_every == 0:
+                    psi_real[idx] = self.psi[trim: self.N - trim].real
+                    psi_imag[idx] = self.psi[trim: self.N - trim].imag
+                    psi_prob[idx] = np.abs(self.psi[trim: self.N - trim]) ** 2
+                    times[idx] = t * self.dt
+                    idx += 1
 
-        # set initial state
-        psi = self.psi0.copy()
-
-        keep_ptr = 0
+        print(f"\nResults saved to: {out_file}")
 
 
-        for n in tqdm(range(self.steps), desc="Propagating", unit="step"):
-            # Split-operator step: V/2 -> T -> V/2
-            psi *= self.expV_half
-            psi_k = fft(psi)
-            psi_k *= self.expT_full
-            psi = ifft(psi_k)
-            psi *= self.expV_half
-
-            # absorber near edges
-            psi *= self.abs_mask
-
-            # Save downsampled snapshots and R/T
-            if n % self.save_every == 0:
-                prob = np.abs(psi) ** 2
-                psi_real_save[keep_ptr, :] = np.real(psi)
-                psi_imag_save[keep_ptr, :] = np.imag(psi)
-                psi_prob_save[keep_ptr, :] = prob
-
-                # --- compute safe measurement windows away from barrier & absorber ---
-
-                left_mask = self.x < self.split_x
-                right_mask = self.x >= self.split_x
-
-                # fallback: if masks are empty (too aggressive margin), relax margin
-                if not np.any(left_mask):
-                    left_mask = (self.x < (self.split_x - 0.1)) & (self.x > self.xmin + self.abs_thickness + 1e-9)
-                if not np.any(right_mask):
-                    right_mask = (self.x > (self.split_x + 0.1)) & (self.x < self.xmax - self.abs_thickness - 1e-9)
-
-                # final fallback: if still empty, use simple left/right half (last resort)
-                if not np.any(left_mask):
-                    left_mask = self.x < self.split_x
-                if not np.any(right_mask):
-                    right_mask = self.x > self.split_x
-
-                # reflection/transmission (integrate in safe regions)
-                R_t[keep_ptr] = np.trapezoid(prob[left_mask], self.x[left_mask])
-                T_t[keep_ptr] = np.trapezoid(prob[right_mask], self.x[right_mask])
-
-                keep_ptr += 1
-
-        # final R/T (use last saved point)
-        R_final = R_t[-1]
-        T_final = T_t[-1]
-
-        # write HDF5
-        with h5py.File(hdf5_path, "w") as f:
-            f.create_dataset("x", data=self.x)
-            f.create_dataset("times", data=times_save)
-            f.create_dataset("V", data=self.V)
-            f.create_dataset("psi_real", data=psi_real_save, compression="gzip")
-            f.create_dataset("psi_imag", data=psi_imag_save, compression="gzip")
-            f.create_dataset("psi_prob", data=psi_prob_save, compression="gzip")
-            f.create_dataset("R_t", data=R_t)
-            f.create_dataset("T_t", data=T_t)
-            f.create_dataset("R_final", data=np.array([R_final]))
-            f.create_dataset("T_final", data=np.array([T_final]))
-
-            # metadata
-            f.attrs["dt"] = self.dt
-            f.attrs["steps"] = self.steps
-            f.attrs["save_every"] = self.save_every
-            f.attrs["x0"] = self.x0
-            f.attrs["sigma"] = self.sigma
-            f.attrs["k0"] = self.k0
-            f.attrs["split_x"] = self.split_x
-            f.attrs["abs_thickness"] = self.abs_thickness
-
-        print(f"\nSaved scattering results to: {hdf5_path}")
-        print(f"Final R ≈ {R_final:.4f}, T ≈ {T_final:.4f}, R+T ≈ {R_final+T_final:.4f}")
-
-
-# -----------------------------------------------------------------------------
-# Example usage
-# -----------------------------------------------------------------------------
+# =============================================================================
+# Script Entry Point
+# =============================================================================
 if __name__ == "__main__":
-    sim = WavePacketScatteringSimulator(
-        xmin=-12.0, xmax=12.0, N=4096,
-        dt=0.01, steps=8000,
-        x0=-6.0, sigma=0.6, k0=6.0,
-        V_center=0.0, V_width=0.6, V_height=8.0,
-        absorber_thickness=0.0, absorber_power=4.0,
-        base_dir="Data/Scattering",
-        save_every=1,
+    N, xmin, xmax = 2048, -30.0, 30.0
+    L, V_in, V_out = 10.0, 0.0, 50
+    k0, x0 = 5.0, -8.0
+    dt, T_total, save_every = 0.001, 8.0, 10
+    absorber_thickness = 10
+
+    precheck_scenario(L, V_in, V_out, k0, x0)
+
+    sim = QuantumSimulator(
+        N=N, xmin=xmin, xmax=xmax,
+        dt=dt, T_total=T_total, save_every=save_every,
+        potential="finite", pot_params={"L": L, "V_inside": V_in, "V_outside": V_out},
+        base_dir="Data/Scattering", absorber_thickness=absorber_thickness
     )
+    sim.set_initial_packet(x0=x0, k0=k0, sigma=1.0)
     sim.run()
+
+    h5file = "Data/Scattering/scattering_run.h5"
+    with h5py.File(h5file, "r") as f:
+        x = f["x"][:]
+        psi_real = f["psi_real"][:]
+        psi_imag = f["psi_imag"][:]
+        psi_prob = f["psi_prob"][:]
+        V = f["V"][:]
+        times = f["times"][:]
+        n_times, N = psi_real.shape
+
+        app = pg.mkQApp("Wave Packet Viewer")
+        win = pg.GraphicsLayoutWidget(show=True, title="Quantum Scattering")
+        win.resize(800, 600)
+
+        p1 = win.addPlot(title="Wavefunction ℜ ψ(x)")
+        curve_real = p1.plot(x, psi_real[0], pen="b")
+
+        p2 = win.addPlot(title="Wavefunction ℑ ψ(x)")
+        curve_imag = p2.plot(x, psi_imag[0], pen="r")
+
+        win.nextRow()
+        p3 = win.addPlot(title="Probability Density |ψ|²")
+        curve_prob = p3.plot(x, psi_prob[0], pen="g")
+
+        Vscale = np.max(np.abs(V))
+        if Vscale > 0:
+            p3.plot(x, V / Vscale * psi_prob.max() * 0.9, pen="y")
+        else:
+            p3.plot(x, V / np.max(V) * psi_prob.max() * 0.9, pen="y")
+
+        frame = 0
+        def update():
+            global frame
+            curve_real.setData(x, psi_real[frame])
+            curve_imag.setData(x, psi_imag[frame])
+            curve_prob.setData(x, psi_prob[frame])
+            frame = (frame + 1) % n_times
+
+        timer = pg.QtCore.QTimer()
+        timer.timeout.connect(update)
+        timer.start(30)
+
+        app.exec()
