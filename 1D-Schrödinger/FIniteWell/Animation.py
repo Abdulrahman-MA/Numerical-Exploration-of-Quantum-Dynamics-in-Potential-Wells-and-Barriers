@@ -96,6 +96,23 @@ class WavePacketScattering(Scene):
                 V_inside, V_outside,
                 V_outside
             ])
+        def make_barrier(x, V, axes, scale_factor=0.9, color=YELLOW):
+            """
+            Create a sharp step-like potential curve aligned with simulation V.
+            """
+            Vmax = np.max(np.abs(V))
+            if Vmax == 0:
+                return VMobject()
+
+            # Rescale V into probability axis range
+            V_scaled = V / Vmax * axes.y_range[1] * scale_factor
+
+            # Use set_points_as_corners for step-like edges (no smoothing)
+            points = [axes.c2p(xx, yy) for xx, yy in zip(x, V_scaled)]
+            barrier_curve = VMobject(color=color, stroke_width=2)
+            barrier_curve.set_points_as_corners(points)
+            return barrier_curve
+        
 
             # Scale into probability plot range
             V_scaled = V_plot / V_plot.max() * axes.y_range[1] * 0.9
@@ -103,11 +120,25 @@ class WavePacketScattering(Scene):
             barrier_curve.set_points_as_corners([axes.c2p(xx, yy) for xx, yy in zip(x_plot, V_scaled)])
             return barrier_curve
 
-        # Replace old barrier
-        L = 10.0  # or pull from metadata / parameters in HDF5
-        V_inside, V_outside = 0.0, 10.0
-        barrier_curve = make_barrier(L, V_inside, V_outside, axes_prob)
+        # ---------------------------------------------------------------------
+        # Load simulation data
+        # ---------------------------------------------------------------------
+        h5file = "Data/Scattering/scattering_run.h5"
+        with h5py.File(h5file, "r") as f:
+            x = f["x"][:]
+            psi_real = f["psi_real"][:]
+            psi_imag = f["psi_imag"][:]
+            psi_prob = f["psi_prob"][:]
+            V = f["V"][:]
+            times = f["times"][:]
 
+        # Rescale potential so it fits on the probability plot
+        Vscale = np.max(np.abs(V))
+        if Vscale > 0:
+            V_scaled = V / Vscale * psi_prob.max() * 0.9
+        else:
+            V_scaled = np.zeros_like(V)
+        # Potential overlay curve
 
         # ----------------------------
         # 3. Helper to make curves
@@ -119,6 +150,7 @@ class WavePacketScattering(Scene):
             return mob
 
         # Initial curves
+        barrier_curve = make_barrier(x, V, axes_prob)
         curve_real = make_curve(psi_real[0], axes_real, GREEN)
         curve_imag = make_curve(psi_imag[0], axes_imag, RED)
         curve_prob = make_curve(psi_prob[0], axes_prob, BLUE )
@@ -168,7 +200,7 @@ class WavePacketScattering(Scene):
         # ----------------------------
         # 6. Animate evolution
         # ----------------------------
-        seconds_per_timeblock = 1   # Time Control Parameter
+        seconds_per_timeblock = 3   # Time Control Parameter
 
 
         for t in range(1, n_times):
@@ -192,12 +224,11 @@ class WavePacketScattering(Scene):
         # ----------------------------
         # 7. Outro
         # ----------------------------
-        self.wait(2)
         self.play(
-            *[FadeOut(mob) for mob in
+            *[Uncreate(mob) for mob in
               [curve_real, curve_imag, curve_prob, barrier_curve,
                axes_real, axes_imag, axes_prob, label_real, label_imag, label_prob,
-               legend_group]],
+               legend_group, time_label]],
             run_time=3
         )
         self.wait(1)
