@@ -88,7 +88,7 @@ class QuantumWellSimulator:
         self.times = np.linspace(0, T_total, int(T_total / dt) + 1)
 
         # Output directory
-        self.num_dir = self.base_dir / potential.capitalize()
+        self.num_dir = self.base_dir / "Numerical"
         os.makedirs(self.num_dir, exist_ok=True)
 
     # -------------------------------------------------------------------------
@@ -197,7 +197,7 @@ if __name__ == "__main__":
     dt, T_total = 0.01, 10.0
     n_states = 5
     pot_params = {"L": 2.0, "V0": 1.0}  # only used for finite or harmonic
-    base_dir = "WellSim/Data"
+    base_dir = "Data"
 
     # === Run simulation ===
     sim = QuantumWellSimulator(N=N, xmin=xmin, xmax=xmax,
