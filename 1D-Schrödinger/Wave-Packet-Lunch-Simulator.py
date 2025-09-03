@@ -147,7 +147,7 @@ class QuantumSimulator:
         # Absorber
         self.abs_mask = make_edge_absorber(self.x, self.x[0], self.x[-1],
                                            thickness=absorber_thickness,
-                                           power=100.0)
+                                           power=12.0)
 
     def set_initial_packet(self, x0=-8.0, k0=6.0, sigma=0.6):
         psi0 = np.exp(-(self.x - x0)**2 / (2 * sigma**2)) * np.exp(1j * k0 * self.x)
@@ -205,9 +205,9 @@ class QuantumSimulator:
 # =============================================================================
 if __name__ == "__main__":
     N, xmin, xmax = 2048, -30.0, 30.0
-    L, V_in, V_out = 10.0, 0.0, 50
-    k0, x0 = 5.0, -8.0
-    dt, T_total, save_every = 0.001, 8.0, 10
+    L, V_in, V_out = 5.0, 0.0, 1.9
+    k0, x0 = 2, -8.0
+    dt, T_total, save_every = 0.001, 20.0, 50
     absorber_thickness = 10
 
     precheck_scenario(L, V_in, V_out, k0, x0)
@@ -216,12 +216,13 @@ if __name__ == "__main__":
         N=N, xmin=xmin, xmax=xmax,
         dt=dt, T_total=T_total, save_every=save_every,
         potential="finite", pot_params={"L": L, "V_inside": V_in, "V_outside": V_out},
-        base_dir="Data/Scattering", absorber_thickness=absorber_thickness
+        base_dir="FiniteWell/Data/Scattering", absorber_thickness=absorber_thickness
     )
+    """Paths : FiniteWell/Data/Scattering, InfiniteWell/Data/Scattering"""
     sim.set_initial_packet(x0=x0, k0=k0, sigma=1.0)
     sim.run()
 
-    h5file = "Data/Scattering/scattering_run.h5"
+    h5file = "FiniteWell/Data/Scattering/scattering_run.h5"
     with h5py.File(h5file, "r") as f:
         x = f["x"][:]
         psi_real = f["psi_real"][:]
